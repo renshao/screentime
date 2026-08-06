@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screen Time</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:           #f9f9f7;
+    --surface-1:      #fcfcfb;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1:       #2a78d6;
+    --series-dim:     #9ec5f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page:           #0d0d0d;
+      --surface-1:      #1a1a19;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-1:       #3987e5;
+      --series-dim:     #1c5cab;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --gridline:       #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-1:       #3987e5;
+    --series-dim:     #1c5cab;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--text-primary);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 32px 20px 64px; }
+
+  header h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; }
+  header p  { margin: 0; color: var(--text-secondary); font-size: 14px; }
+
+  /* one filter row above everything it scopes */
+  .filters {
+    display: flex; flex-wrap: wrap; gap: 16px;
+    margin: 24px 0; padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .filters label {
+    display: flex; flex-direction: column; gap: 6px;
+    font-size: 12px; color: var(--text-muted);
+  }
+  .filters select {
+    font: inherit; font-size: 14px;
+    padding: 7px 10px; min-width: 190px;
+    color: var(--text-primary); background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 22px;
+    margin-bottom: 20px;
+  }
+  .card h2 {
+    margin: 0 0 2px; font-size: 14px; font-weight: 600;
+  }
+  .card .note { margin: 0 0 18px; font-size: 13px; color: var(--text-muted); }
+
+  .summary { display: flex; flex-wrap: wrap; gap: 20px 48px; align-items: baseline; }
+  .hero {
+    font-size: 48px; font-weight: 600; line-height: 1.1;
+    letter-spacing: -0.02em; margin: 6px 0 2px;
+  }
+  .hero-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 4px; }
+  .hero.hero-empty { font-size: 22px; font-weight: 500; color: var(--text-muted); }
+  /* secondary to the hero - the day's headline stays screen time */
+  .stat-value {
+    font-size: 26px; font-weight: 600; line-height: 1.2; margin: 6px 0 2px;
+  }
+  .stat-label { font-size: 13px; color: var(--text-muted); }
+
+  /* 7-day columns */
+  .days { display: flex; align-items: flex-end; gap: 10px; height: 132px; margin-top: 22px; }
+  .day {
+    flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
+    height: 100%; gap: 8px; background: none; border: 0; padding: 0;
+    cursor: pointer; font: inherit; color: inherit;
+  }
+  .day-track { display: flex; align-items: flex-end; height: 100%; }
+  .day-col {
+    width: 100%; max-width: 24px; margin: 0 auto;
+    background: var(--series-dim);
+    border-radius: 4px 4px 0 0;
+    min-height: 2px;
+    transition: background 120ms ease;
+  }
+  .day[aria-pressed="true"] .day-col { background: var(--series-1); }
+  .day:hover .day-col { background: var(--series-1); }
+  /* absent data must not read as a near-zero measurement */
+  .day-col.no-data,
+  .day[aria-pressed="true"] .day-col.no-data,
+  .day:hover .day-col.no-data { background: var(--gridline); height: 100%; }
+  .day-label {
+    font-size: 11px; color: var(--text-muted); text-align: center;
+    border-top: 1px solid var(--baseline); padding-top: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+  .day[aria-pressed="true"] .day-label { color: var(--text-primary); font-weight: 600; }
+
+  /* per-app horizontal bars */
+  .bars { display: flex; flex-direction: column; gap: 8px; }
+  .bar-row {
+    display: grid; grid-template-columns: minmax(90px, 190px) 1fr auto;
+    align-items: center; gap: 14px;
+  }
+  .bar-name {
+    font-size: 13px; color: var(--text-secondary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bar-track { position: relative; height: 14px; }
+  .bar-fill {
+    height: 100%; background: var(--series-1);
+    border-radius: 0 4px 4px 0; min-width: 2px;
+  }
+  .bar-value {
+    font-size: 13px; color: var(--text-secondary);
+    font-variant-numeric: tabular-nums; text-align: right; min-width: 62px;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--gridline); }
+  th {
+    font-size: 12px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  td.num, th.num {
+    text-align: right; font-variant-numeric: tabular-nums;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  .cats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .cat {
+    font-size: 12px; color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 999px; padding: 4px 11px;
+  }
+
+  .empty { color: var(--text-muted); font-size: 14px; padding: 8px 0; }
+
+  #tip {
+    position: fixed; z-index: 10; pointer-events: none; opacity: 0;
+    transition: opacity 100ms ease;
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 10px; font-size: 13px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.13);
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Screen Time</h1>
+    <p id="subtitle">Loading&hellip;</p>
+  </header>
+
+  <div class="filters">
+    <label>Device
+      <select id="deviceSelect"></select>
+    </label>
+    <label>Day
+      <select id="daySelect"></select>
+    </label>
+  </div>
+
+  <section class="card">
+    <h2>Total for the day</h2>
+    <p class="note" id="totalNote"></p>
+    <div class="summary">
+      <div>
+        <div class="hero" id="hero">&mdash;</div>
+        <div class="hero-sub" id="heroSub"></div>
+      </div>
+      <div id="pickStat" hidden>
+        <div class="stat-value" id="pickValue">&mdash;</div>
+        <div class="stat-label">pick-ups</div>
+      </div>
+    </div>
+    <div class="cats" id="cats"></div>
+    <div id="daysWrap" hidden>
+      <div class="days" id="days"></div>
+    </div>
+  </section>
+
+  <section class="card" id="barsCard">
+    <h2 id="barsTitle">App usage</h2>
+    <p class="note">Longest first. Websites are listed alongside apps and are
+      counted inside their app's time, so the bars add up to more than the
+      day total.</p>
+    <div class="bars" id="bars"></div>
+  </section>
+
+  <section class="card" id="pickCard" hidden>
+    <h2 id="pickTitle">Pick-ups</h2>
+    <p class="note">How many times each app was opened. Scraped from the
+      Pick-Ups screen, so a day can have these without screen time, or the
+      other way round.</p>
+    <div class="bars" id="pickBars"></div>
+  </section>
+
+  <section class="card">
+    <h2>All apps and websites</h2>
+    <p class="note">The same values as the charts, as a table. A blank cell
+      means that screen has not been scraped for this day.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>App or website</th>
+          <th class="num">Duration</th>
+          <th class="num">Seconds</th>
+          <th class="num">Pick-ups</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </section>
+</div>
+
+<div id="tip" role="status"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var deviceSelect = document.getElementById("deviceSelect");
+  var daySelect    = document.getElementById("daySelect");
+  var tip          = document.getElementById("tip");
+
+  var state = { data: null, day: null };
+
+  function fmt(seconds) {
+    if (!seconds) return "0s";
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    var s = seconds % 60;
+    if (h) return m ? h + "h " + m + "m" : h + "h";
+    if (m) return s && m < 5 ? m + "m " + s + "s" : m + "m";
+    return s + "s";
+  }
+
+  function dayLabel(iso) {
+    var parts = iso.split("-");
+    var d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+    return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  }
+
+  function shortDay(iso) {
+    var parts = iso.split("-");
+    var d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+    return d.toLocaleDateString(undefined, { weekday: "short" }) + " " + Number(parts[2]);
+  }
+
+  function showTip(evt, text) {
+    tip.textContent = text;
+    tip.style.opacity = "1";
+    var pad = 12;
+    var x = evt.clientX + pad;
+    var y = evt.clientY + pad;
+    var box = tip.getBoundingClientRect();
+    if (x + box.width > window.innerWidth - 8) x = evt.clientX - box.width - pad;
+    if (y + box.height > window.innerHeight - 8) y = evt.clientY - box.height - pad;
+    tip.style.left = x + "px";
+    tip.style.top = y + "px";
+  }
+  function hideTip() { tip.style.opacity = "0"; }
+
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  // Shared by the duration chart and the pick-ups chart. `items` is
+  // [{name, value, label}], already sorted.
+  function renderBars(host, items, emptyText) {
+    clear(host);
+    if (!items.length) {
+      var none = document.createElement("p");
+      none.className = "empty";
+      none.textContent = emptyText;
+      host.appendChild(none);
+      return;
+    }
+    var max = items.reduce(function (m, a) { return Math.max(m, a.value); }, 0) || 1;
+    items.forEach(function (a) {
+      var row = document.createElement("div");
+      row.className = "bar-row";
+
+      var name = document.createElement("div");
+      name.className = "bar-name";
+      name.textContent = a.name;
+      name.title = a.name;
+
+      var track = document.createElement("div");
+      track.className = "bar-track";
+      var fill = document.createElement("div");
+      fill.className = "bar-fill";
+      fill.style.width = Math.max(0.6, (a.value / max) * 100) + "%";
+      track.appendChild(fill);
+
+      var value = document.createElement("div");
+      value.className = "bar-value";
+      value.textContent = a.label;
+
+      row.appendChild(name);
+      row.appendChild(track);
+      row.appendChild(value);
+
+      row.addEventListener("mousemove", function (e) {
+        showTip(e, a.name + " — " + a.tip);
+      });
+      row.addEventListener("mouseleave", hideTip);
+
+      host.appendChild(row);
+    });
+  }
+
+  function renderDays() {
+    var wrap = document.getElementById("daysWrap");
+    var host = document.getElementById("days");
+    clear(host);
+
+    var days = state.data.days;
+    // One column is not a chart - the hero number already says it.
+    if (days.length < 2) { wrap.hidden = true; return; }
+    wrap.hidden = false;
+
+    var max = days.reduce(function (m, d) {
+      return Math.max(m, d.total_seconds || 0);
+    }, 0) || 1;
+
+    days.forEach(function (d) {
+      var btn = document.createElement("button");
+      btn.className = "day";
+      btn.type = "button";
+      btn.setAttribute("aria-pressed", String(d.usage_date === state.day));
+
+      var track = document.createElement("div");
+      track.className = "day-track";
+      var col = document.createElement("div");
+      col.className = "day-col";
+      if (d.total_seconds === null) {
+        // a faint full-height ghost, so it reads as "no reading" not "zero"
+        col.classList.add("no-data");
+      } else {
+        col.style.height =
+          Math.max(2, Math.round((d.total_seconds / max) * 100)) + "%";
+      }
+      track.appendChild(col);
+
+      var label = document.createElement("div");
+      label.className = "day-label";
+      label.textContent = shortDay(d.usage_date);
+
+      btn.appendChild(track);
+      btn.appendChild(label);
+
+      var tipText = dayLabel(d.usage_date) + " — " + (
+        d.total_seconds === null ? "screen time not scraped" : fmt(d.total_seconds));
+      if (d.total_pickups !== null && d.total_pickups !== undefined) {
+        tipText += ", " + d.total_pickups + " pick-ups";
+      }
+
+      btn.addEventListener("mousemove", function (e) { showTip(e, tipText); });
+      btn.addEventListener("mouseleave", hideTip);
+      btn.addEventListener("focus", function () {
+        var r = btn.getBoundingClientRect();
+        showTip({ clientX: r.left + r.width / 2, clientY: r.top }, tipText);
+      });
+      btn.addEventListener("blur", hideTip);
+      btn.addEventListener("click", function () {
+        state.day = d.usage_date;
+        daySelect.value = d.usage_date;
+        renderDay();
+      });
+
+      host.appendChild(btn);
+    });
+  }
+
+  function renderDay() {
+    var data = state.data;
+    var day = state.day;
+    var summary = null;
+    data.days.forEach(function (d) { if (d.usage_date === day) summary = d; });
+
+    var apps = (data.apps[day] || []).slice().sort(function (a, b) {
+      return b.seconds - a.seconds;
+    });
+    var picks = (data.pickups[day] || []).slice().sort(function (a, b) {
+      return b.pickups - a.pickups;
+    });
+
+    var hasScreenTime = summary && summary.total_seconds !== null;
+    var hasPickups = summary && summary.total_pickups !== null &&
+                     summary.total_pickups !== undefined;
+
+    // Exactly one hero per view. Screen time leads when it exists; on a day
+    // that only has pick-ups, the pick-up count is promoted rather than
+    // leaving a 48px em-dash standing in for missing data.
+    var hero = document.getElementById("hero");
+    var pickStat = document.getElementById("pickStat");
+    if (hasScreenTime) {
+      hero.textContent = fmt(summary.total_seconds);
+      document.getElementById("heroSub").textContent =
+        dayLabel(day) + " · shown as “" + summary.total_text + "”";
+      pickStat.hidden = !hasPickups;
+      if (hasPickups) {
+        document.getElementById("pickValue").textContent = summary.total_pickups;
+      }
+    } else if (hasPickups) {
+      hero.textContent = summary.total_pickups;
+      document.getElementById("heroSub").textContent =
+        dayLabel(day) + " · pick-ups · screen time not scraped for this day";
+      pickStat.hidden = true;
+    } else {
+      hero.textContent = "Nothing recorded";
+      hero.classList.add("hero-empty");
+      document.getElementById("heroSub").textContent = dayLabel(day);
+      pickStat.hidden = true;
+    }
+    if (hasScreenTime || hasPickups) hero.classList.remove("hero-empty");
+
+    document.getElementById("totalNote").textContent =
+      summary && summary.scraped_at
+        ? "Last scraped " + summary.scraped_at.replace("T", " ") : "";
+
+    var cats = document.getElementById("cats");
+    clear(cats);
+    (data.categories[day] || []).forEach(function (c) {
+      var el = document.createElement("span");
+      el.className = "cat";
+      el.textContent = c.name + " · " + fmt(c.seconds);
+      cats.appendChild(el);
+    });
+
+    document.getElementById("barsTitle").textContent = "App usage — " + dayLabel(day);
+    renderBars(
+      document.getElementById("bars"),
+      apps.map(function (a) {
+        return { name: a.name, value: a.seconds, label: fmt(a.seconds), tip: a.text };
+      }),
+      "No app activity recorded for this day.");
+
+    document.getElementById("pickCard").hidden = !picks.length;
+    document.getElementById("pickTitle").textContent = "Pick-ups — " + dayLabel(day);
+    renderBars(
+      document.getElementById("pickBars"),
+      picks.map(function (p) {
+        return {
+          name: p.name, value: p.pickups, label: String(p.pickups),
+          tip: p.pickups === 1 ? "1 pick-up" : p.pickups + " pick-ups"
+        };
+      }),
+      "No pick-ups recorded for this day.");
+
+    // One row per app, carrying whichever of the two metrics exist for it.
+    var merged = {};
+    apps.forEach(function (a) {
+      merged[a.name] = { name: a.name, seconds: a.seconds, text: a.text, pickups: null };
+    });
+    picks.forEach(function (p) {
+      if (!merged[p.name]) {
+        merged[p.name] = { name: p.name, seconds: null, text: "", pickups: null };
+      }
+      merged[p.name].pickups = p.pickups;
+    });
+    var rows = Object.keys(merged).map(function (k) { return merged[k]; })
+      .sort(function (a, b) {
+        return (b.seconds || 0) - (a.seconds || 0) || (b.pickups || 0) - (a.pickups || 0);
+      });
+
+    var body = document.getElementById("tableBody");
+    clear(body);
+    if (!rows.length) {
+      var tr = document.createElement("tr");
+      var td = document.createElement("td");
+      td.colSpan = 4;
+      td.className = "empty";
+      td.textContent = "Nothing recorded for this day.";
+      tr.appendChild(td);
+      body.appendChild(tr);
+    }
+    rows.forEach(function (a) {
+      var tr = document.createElement("tr");
+      [
+        [a.name, false],
+        [a.text, true],
+        [a.seconds === null ? "" : a.seconds.toLocaleString(), true],
+        [a.pickups === null ? "" : String(a.pickups), true]
+      ].forEach(function (cell) {
+        var td = document.createElement("td");
+        if (cell[1]) td.className = "num";
+        td.textContent = cell[0];
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+
+    renderDays();
+  }
+
+  function renderAll(data) {
+    state.data = data;
+
+    clear(deviceSelect);
+    data.devices.forEach(function (name) {
+      var opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      if (name === data.device) opt.selected = true;
+      deviceSelect.appendChild(opt);
+    });
+
+    clear(daySelect);
+    data.days.slice().reverse().forEach(function (d) {
+      var opt = document.createElement("option");
+      opt.value = d.usage_date;
+      opt.textContent = dayLabel(d.usage_date);
+      daySelect.appendChild(opt);
+    });
+
+    var subtitle = document.getElementById("subtitle");
+    if (!data.days.length) {
+      subtitle.textContent = data.device
+        ? "No days recorded yet for " + data.device + "."
+        : "No data yet - run log_screentime.py to record a day.";
+      state.day = null;
+      document.getElementById("hero").textContent = "—";
+      clear(document.getElementById("bars"));
+      clear(document.getElementById("tableBody"));
+      document.getElementById("daysWrap").hidden = true;
+      document.getElementById("pickStat").hidden = true;
+      document.getElementById("pickCard").hidden = true;
+      return;
+    }
+
+    subtitle.textContent = data.days.length === 1
+      ? "1 day recorded for " + data.device
+      : data.days.length + " days recorded for " + data.device;
+
+    state.day = data.days[data.days.length - 1].usage_date;
+    daySelect.value = state.day;
+    renderDay();
+  }
+
+  function load(device) {
+    var url = "/api/data" + (device ? "?device=" + encodeURIComponent(device) : "");
+    fetch(url)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.error) {
+          document.getElementById("subtitle").textContent = data.error;
+          return;
+        }
+        renderAll(data);
+      })
+      .catch(function (err) {
+        document.getElementById("subtitle").textContent = "Could not load data: " + err;
+      });
+  }
+
+  deviceSelect.addEventListener("change", function () { load(deviceSelect.value); });
+  daySelect.addEventListener("change", function () {
+    state.day = daySelect.value;
+    renderDay();
+  });
+
+  load(null);
+})();
+</script>
+</body>
+</html>

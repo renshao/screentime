@@ -87,9 +87,22 @@ unset `SCREENTIME_SERVER`) to go back to writing locally.
 
 ### Access control
 
-`SCREENTIME_TOKEN` guards both reading and ingesting. Send it as
-`Authorization: Bearer <token>`, or as the **password** in HTTP Basic with any
-username - which is what a browser prompt gives you, so no login page is needed.
+`SCREENTIME_TOKEN` guards both reading and ingesting. Three ways to present it:
+
+| Caller | Credential |
+|---|---|
+| Browser | Sign in once through the form; a 90-day cookie carries it after that |
+| Scraper | `Authorization: Bearer <token>`, sent automatically by `--server` |
+| `curl` | `-u any:<token>` (Basic, token as the password) or a bearer header |
+
+Visiting the page without a valid cookie shows a single-field sign-in form, so
+the token never appears in a URL or in browser history. The cookie is `HttpOnly`,
+`SameSite=Lax`, and `Secure` whenever the proxy reports HTTPS. It carries a
+signed expiry rather than the token, and there is no session store to keep.
+`/logout` clears it.
+
+Requests to `/api/…` without credentials get a plain `401` instead of the form,
+so scripts see a status code rather than HTML.
 
 Serving off-loopback without a token is refused, because this is a per-app log
 of your children's activity and "always accessible" also means reachable by

@@ -12,11 +12,14 @@ refresh. Standard library only - no pip install, no network access.
 import argparse
 import base64
 import binascii
+import hashlib
 import hmac
+import http.cookies
 import json
 import os
 import sqlite3
 import sys
+import time
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -161,6 +164,77 @@ def device_data(conn, device):
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 MAX_BODY = 5 * 1024 * 1024
 
+SESSION_COOKIE = "st_session"
+SESSION_MAX_AGE = 90 * 24 * 3600  # 90 days
+
+
+def session_value(token, expires_at):
+    """A self-verifying cookie: an expiry plus an HMAC of it under the token.
+
+    No server-side session store is needed, the cookie does not contain the
+    token itself, and an expired one cannot be replayed because the expiry is
+    inside the signed material.
+    """
+    message = ("screentime-session|%d" % expires_at).encode("utf-8")
+    mac = hmac.new(token.encode("utf-8"), message, hashlib.sha256).hexdigest()
+    return "%d.%s" % (expires_at, mac)
+
+
+def session_valid(token, value):
+    try:
+        expires_str, mac = (value or "").split(".", 1)
+        expires_at = int(expires_str)
+    except (ValueError, AttributeError):
+        return False
+    if expires_at < time.time():
+        return False
+    return hmac.compare_digest(mac, session_value(token, expires_at).split(".", 1)[1])
+
+
+LOGIN_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Screen Time</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:#f9f9f7; --surface:#fcfcfb; --text:#0b0b0b; --muted:#52514e;
+    --border:rgba(11,11,11,0.10); --accent:#2a78d6; --danger:#d03b3b;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    color-scheme: dark;
+    --page:#0d0d0d; --surface:#1a1a19; --text:#ffffff; --muted:#c3c2b7;
+    --border:rgba(255,255,255,0.10); --accent:#3987e5; --danger:#e66767;
+  } }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center;
+    justify-content:center; background:var(--page); color:var(--text);
+    font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; padding:20px; }
+  form { background:var(--surface); border:1px solid var(--border);
+    border-radius:12px; padding:26px 24px; width:100%; max-width:340px; }
+  h1 { margin:0 0 4px; font-size:18px; font-weight:600; }
+  p { margin:0 0 20px; font-size:13px; color:var(--muted); }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+  input { width:100%; font:inherit; padding:9px 11px; color:var(--text);
+    background:var(--page); border:1px solid var(--border); border-radius:8px; }
+  button { width:100%; margin-top:14px; font:inherit; font-weight:600;
+    padding:10px; color:#fff; background:var(--accent); border:0;
+    border-radius:8px; cursor:pointer; }
+  .error { color:var(--danger); font-size:13px; margin:0 0 14px; }
+</style></head>
+<body>
+  <form method="POST" action="/login">
+    <h1>Screen Time</h1>
+    <p>This page is protected. Enter the access token.</p>
+    <!--ERROR-->
+    <label for="token">Access token</label>
+    <input id="token" name="token" type="password" autocomplete="current-password"
+           autofocus required>
+    <button type="submit">Sign in</button>
+  </form>
+</body></html>
+"""
+
 
 class Handler(BaseHTTPRequestHandler):
     db_path = DEFAULT_DB
@@ -171,9 +245,15 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _authorized(self):
-        """Accept `Authorization: Bearer <token>`, or Basic with the token as
-        the password so a browser can just prompt. Returns True when the request
-        may proceed; otherwise it has already sent a 401."""
+        """True when the caller may proceed. Three credentials are accepted:
+
+        - `Authorization: Bearer <token>` - what the scraper sends
+        - `Authorization: Basic <anything>:<token>` - for curl
+        - the session cookie set by signing in through the form
+
+        This only reports; callers decide whether to answer with the login page
+        or a 401, since a browser wants the form and an API client does not.
+        """
         if not self.token:
             return True
 
@@ -188,18 +268,69 @@ class Handler(BaseHTTPRequestHandler):
                 decoded = ""
             if ":" in decoded:
                 supplied = decoded.split(":", 1)[1]
-
         if supplied is not None and hmac.compare_digest(supplied, self.token):
             return True
 
-        body = b"authentication required"
-        self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="Screen Time"')
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        raw = self.headers.get("Cookie")
+        if raw:
+            try:
+                jar = http.cookies.SimpleCookie(raw)
+            except http.cookies.CookieError:
+                return False
+            morsel = jar.get(SESSION_COOKIE)
+            if morsel and session_valid(self.token, morsel.value):
+                return True
         return False
+
+    def _send_unauthorized(self):
+        self._send(401, "authentication required", "text/plain; charset=utf-8")
+
+    def _send_login_page(self, error=None, status=200):
+        # Plain substitution, not %-formatting or .format(): the page's CSS
+        # contains both "100%" and braces, either of which those would choke on.
+        banner = '<p class="error">%s</p>' % error if error else ""
+        markup = LOGIN_PAGE.replace("<!--ERROR-->", banner)
+        self._send(status, markup, "text/html; charset=utf-8")
+
+    def _is_https(self):
+        # Behind a TLS-terminating proxy the connection here is plain HTTP, so
+        # the proxy's header is the only way to know the browser used HTTPS.
+        return self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+
+    def _set_session_cookie(self, value, max_age):
+        parts = ["%s=%s" % (SESSION_COOKIE, value), "Path=/",
+                 "Max-Age=%d" % max_age, "HttpOnly", "SameSite=Lax"]
+        if self._is_https():
+            parts.append("Secure")
+        self.send_header("Set-Cookie", "; ".join(parts))
+
+    def _redirect(self, location, cookie=None, max_age=SESSION_MAX_AGE):
+        self.send_response(303)
+        self.send_header("Location", location)
+        if cookie is not None:
+            self._set_session_cookie(cookie, max_age)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _handle_login(self):
+        if not self.token:
+            self._redirect("/")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(min(length, 4096)).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            body = ""
+        supplied = (parse_qs(body).get("token") or [""])[0]
+
+        if supplied and hmac.compare_digest(supplied, self.token):
+            expires_at = int(time.time()) + SESSION_MAX_AGE
+            self._redirect("/", session_value(self.token, expires_at))
+        else:
+            self._send_login_page("That token was not accepted.", status=401)
+
+    def _handle_logout(self):
+        self._redirect("/", cookie="", max_age=0)
 
     def _read_json_body(self):
         try:
@@ -213,10 +344,20 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
     def do_POST(self):
-        if urlparse(self.path).path != "/api/ingest":
+        path = urlparse(self.path).path
+
+        if path == "/login":
+            self._handle_login()
+            return
+        if path == "/logout":
+            self._handle_logout()
+            return
+
+        if path != "/api/ingest":
             self._send(404, "not found", "text/plain; charset=utf-8")
             return
         if not self._authorized():
+            self._send_unauthorized()
             return
 
         try:
@@ -279,7 +420,20 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         query = parse_qs(url.query)
 
+        if url.path == "/logout":
+            self._handle_logout()
+            return
+
         if not self._authorized():
+            # A person gets a form to fill in; a script gets a status code.
+            if url.path in ("/", "/index.html", "/login"):
+                self._send_login_page()
+            else:
+                self._send_unauthorized()
+            return
+
+        if url.path == "/login":
+            self._redirect("/")
             return
 
         if url.path in ("/", "/index.html"):

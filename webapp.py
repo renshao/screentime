@@ -10,12 +10,18 @@ refresh. Standard library only - no pip install, no network access.
 """
 
 import argparse
+import base64
+import binascii
+import hmac
 import json
 import os
 import sqlite3
 import sys
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+import log_screentime as st  # the storage logic and its safety guard live there
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DB = os.path.join(HERE, "screentime.db")
@@ -152,12 +158,109 @@ def device_data(conn, device):
             "categories": categories, "pickups": pickups}
 
 
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+MAX_BODY = 5 * 1024 * 1024
+
+
 class Handler(BaseHTTPRequestHandler):
     db_path = DEFAULT_DB
     default_device = DEFAULT_DEVICE
+    token = None
 
     def log_message(self, fmt, *args):  # quieter console
         pass
+
+    def _authorized(self):
+        """Accept `Authorization: Bearer <token>`, or Basic with the token as
+        the password so a browser can just prompt. Returns True when the request
+        may proceed; otherwise it has already sent a 401."""
+        if not self.token:
+            return True
+
+        header = self.headers.get("Authorization", "")
+        supplied = None
+        if header.startswith("Bearer "):
+            supplied = header[7:].strip()
+        elif header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(header[6:].strip()).decode("utf-8")
+            except (binascii.Error, UnicodeDecodeError, ValueError):
+                decoded = ""
+            if ":" in decoded:
+                supplied = decoded.split(":", 1)[1]
+
+        if supplied is not None and hmac.compare_digest(supplied, self.token):
+            return True
+
+        body = b"authentication required"
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Screen Time"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
+
+    def _read_json_body(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            raise ValueError("empty request body")
+        if length > MAX_BODY:
+            raise ValueError("request body too large")
+        return json.loads(self.rfile.read(length).decode("utf-8"))
+
+    def do_POST(self):
+        if urlparse(self.path).path != "/api/ingest":
+            self._send(404, "not found", "text/plain; charset=utf-8")
+            return
+        if not self._authorized():
+            return
+
+        try:
+            payload = self._read_json_body()
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._json({"error": "bad request body: %s" % exc}, 400)
+            return
+
+        try:
+            usage_date = date.fromisoformat(payload["usage_date"])
+            data = {
+                "screen": payload.get("screen", "apps"),
+                "device": payload["device"],
+                "date_label": payload.get("date_label", ""),
+                "view_mode": payload.get("view_mode"),
+                "total_text": payload["total_text"],
+                "categories": [tuple(c) for c in payload.get("categories", [])],
+                "items": [tuple(i) for i in payload.get("items", [])],
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            self._json({"error": "malformed payload: %s" % exc}, 400)
+            return
+
+        scraped_at = payload.get("scraped_at") or \
+            datetime.now().isoformat(timespec="seconds")
+        force = bool(payload.get("force"))
+
+        try:
+            if data["screen"] == "pickups":
+                st.store_pickups(self.db_path, data, usage_date, scraped_at, force)
+            else:
+                st.store(self.db_path, data, usage_date, scraped_at, force)
+        except st.ScrapeError as exc:
+            # The anti-regression guard rejected it - the client can retry
+            # with force. 409 so that is distinguishable from a bad request.
+            self._json({"error": str(exc)}, 409)
+            return
+        except sqlite3.Error as exc:
+            self._json({"error": "database error: %s" % exc}, 500)
+            return
+
+        self._json({"stored": len(data["items"]), "screen": data["screen"],
+                    "device": data["device"],
+                    "usage_date": usage_date.isoformat()})
 
     def _send(self, status, body, content_type):
         if isinstance(body, str):
@@ -175,6 +278,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
         query = parse_qs(url.query)
+
+        if not self._authorized():
+            return
 
         if url.path in ("/", "/index.html"):
             try:
@@ -229,16 +335,34 @@ def main():
                              "is no authentication, so only on a trusted network")
     parser.add_argument("--device", default=DEFAULT_DEVICE,
                         help="device selected on load (default: %(default)s)")
+    parser.add_argument("--token", default=os.environ.get("SCREENTIME_TOKEN"),
+                        help="shared secret required to read or ingest. "
+                             "Defaults to $SCREENTIME_TOKEN")
+    parser.add_argument("--no-auth", action="store_true",
+                        help="serve without a token even off-loopback. Only "
+                             "sensible on a private network such as Tailscale")
     args = parser.parse_args()
+
+    off_loopback = args.host not in LOOPBACK
+    if off_loopback and not args.token and not args.no_auth:
+        print("refusing to serve on %s without a token: this data would be "
+              "readable by anyone who can reach the port.\n"
+              "  set one:      export SCREENTIME_TOKEN=$(python3 -c "
+              "'import secrets;print(secrets.token_urlsafe(32))')\n"
+              "  or override:  --no-auth  (private networks only)"
+              % args.host, file=sys.stderr)
+        return 2
 
     Handler.db_path = args.db
     Handler.default_device = args.device
+    Handler.token = args.token
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print("Screen Time viewer on http://%s:%d  (ctrl-c to stop)"
           % ("localhost" if args.host in ("127.0.0.1", "") else args.host, args.port))
-    if args.host == "0.0.0.0":
-        print("listening on all interfaces - anyone on this network can read "
-              "this data, and it is served over plain HTTP")
+    if off_loopback:
+        print("reachable from other machines; %s"
+              % ("token required" if args.token else "NO AUTH - anyone who can "
+                 "reach this port can read the data"))
     print("reading %s" % args.db)
     try:
         server.serve_forever()

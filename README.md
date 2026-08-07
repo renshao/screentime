@@ -56,6 +56,60 @@ throws away the old rows, the script refuses to overwrite a fuller record with a
 thinner one (fewer apps, or a smaller total) unless you pass `--force` - the
 Settings table is virtualized and an ill-timed read can come back short.
 
+## Running the database on a server
+
+The scraper has to run on the Mac showing the Settings window, but the database
+and the viewer can live on a server so the page is always up. Rather than
+exposing a database port, `webapp.py` accepts scrapes over HTTP and writes them
+to its own SQLite file - the scraper posts, the server stores.
+
+The data is small enough that SQLite is the right choice, not a compromise: a
+month of two devices is ~340 KB, growing about 4 MB a year. SQLite's real limit
+is concurrent *writers*, and there is exactly one - your Mac, a few times a day.
+
+**On the server:**
+
+```sh
+export SCREENTIME_TOKEN=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
+python3 webapp.py --host 0.0.0.0
+```
+
+**On the Mac**, with Settings showing the day you want:
+
+```sh
+export SCREENTIME_SERVER=https://screentime.example.com
+export SCREENTIME_TOKEN=…same value as the server…
+python3 log_screentime.py
+```
+
+That writes straight to the server; `--db` is not touched. Drop `--server` (or
+unset `SCREENTIME_SERVER`) to go back to writing locally.
+
+### Access control
+
+`SCREENTIME_TOKEN` guards both reading and ingesting. Send it as
+`Authorization: Bearer <token>`, or as the **password** in HTTP Basic with any
+username - which is what a browser prompt gives you, so no login page is needed.
+
+Serving off-loopback without a token is refused, because this is a per-app log
+of your children's activity and "always accessible" also means reachable by
+anyone who finds the port. Two ways to satisfy it:
+
+- **Public host:** set a token, and terminate TLS in front (Caddy needs about
+  two lines). Over plain HTTP the token itself crosses the network in clear, and
+  the scraper warns when it notices.
+- **Private network** (Tailscale, VPN, LAN you trust): `--no-auth` skips the
+  requirement deliberately.
+
+### What does *not* work
+
+Do not put the SQLite file on a network share - NFS, SMB, Dropbox, iCloud Drive -
+and point both machines at it. SQLite's locking is unreliable over network
+filesystems and will eventually corrupt the file. Reaching the file through a
+process on that machine, as the ingest endpoint does, is the fix.
+
+Backups are `scp` of one file. Restores are copying it back.
+
 ## Schema
 
 `screentime.db`. The App & Website Activity tables are keyed by
@@ -98,6 +152,10 @@ sqlite3 -column -header screentime.db "
 
 - `scrape_screentime.js` - JXA; reads the visible pane, prints tab-separated records
 - `log_screentime.py` - runs the scraper, parses durations and dates, writes SQLite
+  locally or posts to a remote `webapp.py`
+- `webapp.py` - serves the viewer and the `POST /api/ingest` endpoint; both share
+  the storage functions in `log_screentime.py`, so the replace-a-day behaviour and
+  its guard work identically whether you write locally or remotely
 
 The scraper is deliberately read-only apart from clearing the table selection,
 and never navigates between days or devices - driving the date stepper proved

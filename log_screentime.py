@@ -13,11 +13,14 @@ numbers.
 """
 
 import argparse
+import json
 import os
 import re
 import sqlite3
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from datetime import date, datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -371,6 +374,47 @@ def store(db_path, data, usage_date, scraped_at, force=False):
         conn.close()
 
 
+def send_to_server(base_url, token, data, usage_date, scraped_at, force=False):
+    """POST a scrape to a remote webapp.py instead of writing SQLite locally."""
+    payload = {
+        "screen": data["screen"],
+        "device": data["device"],
+        "usage_date": usage_date.isoformat(),
+        "date_label": data["date_label"],
+        "view_mode": data["view_mode"],
+        "total_text": data["total_text"],
+        "categories": data["categories"],
+        "items": data["items"],
+        "scraped_at": scraped_at,
+        "force": force,
+    }
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/api/ingest",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST")
+    if token:
+        request.add_header("Authorization", "Bearer " + token)
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        try:
+            detail = json.loads(detail).get("error", detail)
+        except json.JSONDecodeError:
+            pass
+        if exc.code == 401:
+            raise ScrapeError(
+                "the server rejected the token. Pass --token or set "
+                "$SCREENTIME_TOKEN to the same value the server was started with.")
+        raise ScrapeError("the server refused this scrape (HTTP %d).\n%s"
+                          % (exc.code, detail))
+    except urllib.error.URLError as exc:
+        raise ScrapeError("could not reach %s: %s" % (base_url, exc.reason))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -381,7 +425,19 @@ def main():
                         help="print what would be stored, without writing")
     parser.add_argument("--force", action="store_true",
                         help="overwrite even if this scrape looks incomplete")
+    parser.add_argument("--server", default=os.environ.get("SCREENTIME_SERVER"),
+                        help="base URL of a webapp.py instance to send this "
+                             "scrape to instead of writing --db locally. "
+                             "Defaults to $SCREENTIME_SERVER")
+    parser.add_argument("--token", default=os.environ.get("SCREENTIME_TOKEN"),
+                        help="shared secret for --server. Defaults to "
+                             "$SCREENTIME_TOKEN")
     args = parser.parse_args()
+
+    if args.server and args.server.startswith("http://") and \
+            not args.server.startswith(("http://localhost", "http://127.0.0.1")):
+        print("warning: %s is plain HTTP, so the token and this data cross the "
+              "network unencrypted." % args.server, file=sys.stderr)
 
     try:
         data = parse_scraper_output(run_scraper())
@@ -421,18 +477,24 @@ def main():
         print("\ndry run - nothing written")
         return 0
 
+    label = "apps" if pickups else "items"
     try:
-        if pickups:
-            store_pickups(args.db, data, usage_date, scraped_at, force=args.force)
+        if args.server:
+            send_to_server(args.server, args.token, data, usage_date,
+                           scraped_at, force=args.force)
+            target = args.server
         else:
-            store(args.db, data, usage_date, scraped_at, force=args.force)
+            if pickups:
+                store_pickups(args.db, data, usage_date, scraped_at, force=args.force)
+            else:
+                store(args.db, data, usage_date, scraped_at, force=args.force)
+            target = args.db
     except ScrapeError as exc:
         print("\nerror: %s" % exc, file=sys.stderr)
         return 1
 
     print("\nstored %d %s in %s at %s"
-          % (len(data["items"]), "apps" if pickups else "items",
-             args.db, scraped_at))
+          % (len(data["items"]), label, target, scraped_at))
     return 0
 
 

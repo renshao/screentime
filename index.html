@@ -17,6 +17,15 @@
     --border:         rgba(11,11,11,0.10);
     --series-1:       #2a78d6;
     --series-dim:     #9ec5f4;
+    /* Screen-time heat: one warm ramp, amber -> red, darker = more time.
+       Built in OKLCH with evenly stepped lightness, so the order reads in
+       grayscale and to colour-blind viewers, not just by hue. */
+    --heat-1:         #fddfbe;
+    --heat-2:         #fdb57e;
+    --heat-3:         #f2814a;
+    --heat-4:         #d8482c;
+    --heat-5:         #a32321;
+    --heat-empty:     #d9d8d1;
   }
   @media (prefers-color-scheme: dark) {
     :root:where(:not([data-theme="light"])) {
@@ -31,6 +40,12 @@
       --border:         rgba(255,255,255,0.10);
       --series-1:       #3987e5;
       --series-dim:     #1c5cab;
+      --heat-1:         #55391b;
+      --heat-2:         #824717;
+      --heat-3:         #b45018;
+      --heat-4:         #dd5230;
+      --heat-5:         #ff6b63;
+      --heat-empty:     #3a3a37;
     }
   }
   :root[data-theme="dark"] {
@@ -45,6 +60,14 @@
     --border:         rgba(255,255,255,0.10);
     --series-1:       #3987e5;
     --series-dim:     #1c5cab;
+    /* Dark mode flips the anchor: little use sits close to the surface and
+       heavy days glow brightest, rather than inverting the light ramp. */
+    --heat-1:         #55391b;
+    --heat-2:         #824717;
+    --heat-3:         #b45018;
+    --heat-4:         #dd5230;
+    --heat-5:         #ff6b63;
+    --heat-empty:     #3a3a37;
   }
 
   * { box-sizing: border-box; }
@@ -101,33 +124,51 @@
   }
   .stat-label { font-size: 13px; color: var(--text-muted); }
 
-  /* 7-day columns */
-  .days { display: flex; align-items: flex-end; gap: 10px; height: 132px; margin-top: 22px; }
-  .day {
-    flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
-    height: 100%; gap: 8px; background: none; border: 0; padding: 0;
-    cursor: pointer; font: inherit; color: inherit;
+  /* year calendar heatmap */
+  .cal-stats {
+    display: flex; flex-wrap: wrap; gap: 12px 40px; margin: 0 0 18px;
   }
-  .day-track { display: flex; align-items: flex-end; height: 100%; }
-  .day-col {
-    width: 100%; max-width: 24px; margin: 0 auto;
-    background: var(--series-dim);
-    border-radius: 4px 4px 0 0;
-    min-height: 2px;
-    transition: background 120ms ease;
+  .cal-stats .stat-value { font-size: 20px; margin: 0; }
+  /* The grid keeps a usable cell size on a phone and scrolls sideways inside
+     the card instead of shrinking to specks or widening the page. */
+  .cal-scroll { overflow-x: auto; padding: 3px 3px 12px; margin: 0 -3px; }
+  .cal {
+    display: grid;
+    grid-template-columns: 28px repeat(var(--weeks), minmax(11px, 1fr));
+    grid-template-rows: 16px repeat(7, auto);
+    gap: 3px;
+    min-width: calc(28px + var(--weeks) * 14px);
   }
-  .day[aria-pressed="true"] .day-col { background: var(--series-1); }
-  .day:hover .day-col { background: var(--series-1); }
-  /* absent data must not read as a near-zero measurement */
-  .day-col.no-data,
-  .day[aria-pressed="true"] .day-col.no-data,
-  .day:hover .day-col.no-data { background: var(--gridline); height: 100%; }
-  .day-label {
-    font-size: 11px; color: var(--text-muted); text-align: center;
-    border-top: 1px solid var(--baseline); padding-top: 6px;
-    font-variant-numeric: tabular-nums;
+  .cal-month, .cal-wday {
+    font-size: 11px; line-height: 1; color: var(--text-muted);
+    white-space: nowrap; align-self: center;
   }
-  .day[aria-pressed="true"] .day-label { color: var(--text-primary); font-weight: 600; }
+  .cal-month { align-self: start; }
+  .cell {
+    aspect-ratio: 1; width: 100%; padding: 0; border: 0;
+    border-radius: 3px; cursor: pointer;
+    /* hollow: "nobody scraped this day" must not read as a light day */
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--heat-empty);
+  }
+  .cell[data-level] { box-shadow: none; }
+  .cell[data-level="1"] { background: var(--heat-1); }
+  .cell[data-level="2"] { background: var(--heat-2); }
+  .cell[data-level="3"] { background: var(--heat-3); }
+  .cell[data-level="4"] { background: var(--heat-4); }
+  .cell[data-level="5"] { background: var(--heat-5); }
+  .cell.unrecorded { cursor: default; }
+  .cell:focus { outline: none; }
+  .cell:focus-visible,
+  .cell[aria-pressed="true"] {
+    outline: 2px solid var(--text-primary); outline-offset: 1px;
+  }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 14px;
+    font-size: 12px; color: var(--text-secondary);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .cell { display: inline-block; width: 11px; height: 11px; cursor: default; }
 
   /* per-app horizontal bars */
   .bars { display: flex; flex-direction: column; gap: 8px; }
@@ -195,6 +236,18 @@
     </label>
   </div>
 
+  <section class="card" id="calCard">
+    <h2 id="calTitle">Last 12 months</h2>
+    <p class="note">Daily screen time. The darker and redder a square, the
+      more time that day; hollow squares are days that were not scraped.
+      Click a day to see its breakdown below.</p>
+    <div class="cal-stats" id="calStats"></div>
+    <div class="cal-scroll" id="calScroll">
+      <div class="cal" id="cal" role="grid" aria-label="Daily screen time, last 12 months"></div>
+    </div>
+    <div class="legend" id="legend"></div>
+  </section>
+
   <section class="card">
     <h2>Total for the day</h2>
     <p class="note" id="totalNote"></p>
@@ -209,9 +262,6 @@
       </div>
     </div>
     <div class="cats" id="cats"></div>
-    <div id="daysWrap" hidden>
-      <div class="days" id="days"></div>
-    </div>
   </section>
 
   <section class="card" id="barsCard">
@@ -258,7 +308,22 @@
   var daySelect    = document.getElementById("daySelect");
   var tip          = document.getElementById("tip");
 
-  var state = { data: null, day: null };
+  // Upper bounds (seconds) of heat levels 1-4; anything at or above the last
+  // is level 5. Fixed hours rather than quantiles of the data, so a colour
+  // means the same amount of time on every device and every month, and a
+  // generally heavy year still looks heavy.
+  var HEAT_STEPS = [3600, 2 * 3600, 4 * 3600, 6 * 3600];
+  var HEAT_LABELS = ["Under 1h", "1–2h", "2–4h", "4–6h", "6h or more"];
+
+  var state = {
+    data: null,       // /api/data payload
+    byDate: {},       // usage_date -> day summary
+    day: null,        // selected usage_date
+    details: {},      // usage_date -> /api/day payload, per device
+    cells: {},        // usage_date -> calendar button
+    focusDate: null,  // the calendar's single tab stop
+    loadSeq: 0
+  };
 
   function fmt(seconds) {
     if (!seconds) return "0s";
@@ -270,16 +335,32 @@
     return s + "s";
   }
 
-  function dayLabel(iso) {
-    var parts = iso.split("-");
-    var d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
-    return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  // Dates are handled as local calendar days at noon, so adding days never
+  // trips over a daylight-saving change.
+  function parseIso(iso) {
+    var p = iso.split("-");
+    return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]), 12);
+  }
+  function toIso(d) {
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") +
+      "-" + String(d.getDate()).padStart(2, "0");
+  }
+  function addDays(d, n) {
+    var c = new Date(d.getTime());
+    c.setDate(c.getDate() + n);
+    return c;
   }
 
-  function shortDay(iso) {
-    var parts = iso.split("-");
-    var d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
-    return d.toLocaleDateString(undefined, { weekday: "short" }) + " " + Number(parts[2]);
+  function dayLabel(iso) {
+    return parseIso(iso).toLocaleDateString(undefined,
+      { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  }
+
+  function heatLevel(seconds) {
+    for (var i = 0; i < HEAT_STEPS.length; i++) {
+      if (seconds < HEAT_STEPS[i]) return i + 1;
+    }
+    return HEAT_STEPS.length + 1;
   }
 
   function showTip(evt, text) {
@@ -343,81 +424,246 @@
     });
   }
 
-  function renderDays() {
-    var wrap = document.getElementById("daysWrap");
-    var host = document.getElementById("days");
+  // ---- calendar heatmap ---------------------------------------------------
+
+  function cellTip(iso) {
+    var d = state.byDate[iso];
+    if (!d) return dayLabel(iso) + " — not scraped";
+    var text = dayLabel(iso) + " — " + (
+      d.total_seconds === null ? "screen time not scraped" : fmt(d.total_seconds));
+    if (d.total_pickups !== null && d.total_pickups !== undefined) {
+      text += ", " + d.total_pickups + " pick-ups";
+    }
+    return text;
+  }
+
+  function stat(value, label) {
+    var wrap = document.createElement("div");
+    var v = document.createElement("div");
+    v.className = "stat-value";
+    v.textContent = value;
+    var l = document.createElement("div");
+    l.className = "stat-label";
+    l.textContent = label;
+    wrap.appendChild(v);
+    wrap.appendChild(l);
+    return wrap;
+  }
+
+  function renderCalStats() {
+    var host = document.getElementById("calStats");
     clear(host);
+    var timed = state.data.days.filter(function (d) { return d.total_seconds !== null; });
+    if (!timed.length) { host.hidden = true; return; }
+    host.hidden = false;
+    var total = timed.reduce(function (s, d) { return s + d.total_seconds; }, 0);
+    var heaviest = timed.reduce(function (m, d) {
+      return d.total_seconds > m.total_seconds ? d : m;
+    });
+    var heavyDays = timed.filter(function (d) {
+      return d.total_seconds >= HEAT_STEPS[2];
+    }).length;
+    host.appendChild(stat(fmt(Math.round(total / timed.length)), "daily average"));
+    host.appendChild(stat(String(timed.length), timed.length === 1 ? "day recorded" : "days recorded"));
+    host.appendChild(stat(String(heavyDays), "days of 4h or more"));
+    host.appendChild(stat(fmt(heaviest.total_seconds),
+      "most, on " + parseIso(heaviest.usage_date).toLocaleDateString(undefined,
+        { day: "numeric", month: "short" })));
+  }
 
-    var days = state.data.days;
-    // One column is not a chart - the hero number already says it.
-    if (days.length < 2) { wrap.hidden = true; return; }
-    wrap.hidden = false;
+  function renderLegend() {
+    var host = document.getElementById("legend");
+    clear(host);
+    HEAT_LABELS.forEach(function (label, i) {
+      var item = document.createElement("span");
+      var sw = document.createElement("i");
+      sw.className = "cell";
+      sw.setAttribute("data-level", String(i + 1));
+      item.appendChild(sw);
+      item.appendChild(document.createTextNode(label));
+      host.appendChild(item);
+    });
+    var item = document.createElement("span");
+    var sw = document.createElement("i");
+    sw.className = "cell";
+    item.appendChild(sw);
+    item.appendChild(document.createTextNode("Not scraped"));
+    host.appendChild(item);
+  }
 
-    var max = days.reduce(function (m, d) {
-      return Math.max(m, d.total_seconds || 0);
-    }, 0) || 1;
+  function renderCalendar() {
+    var cal = document.getElementById("cal");
+    clear(cal);
+    state.cells = {};
 
-    days.forEach(function (d) {
+    var start = parseIso(state.data.start);
+    var end = parseIso(state.data.end);
+    // Weeks run Monday to Sunday, one column each, like a wall calendar.
+    var lead = (start.getDay() + 6) % 7;          // 0 = Monday
+    var gridStart = addDays(start, -lead);
+    var totalDays = Math.round((end - gridStart) / 86400000) + 1;
+    var weeks = Math.ceil(totalDays / 7);
+    cal.style.setProperty("--weeks", String(weeks));
+
+    ["Mon", "", "Wed", "", "Fri", "", ""].forEach(function (name, row) {
+      if (!name) return;
+      var el = document.createElement("div");
+      el.className = "cal-wday";
+      el.textContent = name;
+      el.style.gridColumn = "1";
+      el.style.gridRow = String(row + 2);
+      cal.appendChild(el);
+    });
+
+    var lastMonthCol = -10;
+    for (var i = lead; i < totalDays; i++) {
+      var date = addDays(gridStart, i);
+      var iso = toIso(date);
+      var col = Math.floor(i / 7);
+      var row = i % 7;
+
+      // A month label over the first column that contains its 1st (or over
+      // the first column of the grid), skipped when it would collide.
+      if ((date.getDate() <= 7 && row === 0) || i === lead) {
+        if (col - lastMonthCol >= 3) {
+          var m = document.createElement("div");
+          m.className = "cal-month";
+          m.textContent = date.toLocaleDateString(undefined, { month: "short" });
+          m.style.gridColumn = (col + 2) + " / span 3";
+          m.style.gridRow = "1";
+          cal.appendChild(m);
+          lastMonthCol = col;
+        }
+      }
+
+      var d = state.byDate[iso];
       var btn = document.createElement("button");
-      btn.className = "day";
       btn.type = "button";
-      btn.setAttribute("aria-pressed", String(d.usage_date === state.day));
-
-      var track = document.createElement("div");
-      track.className = "day-track";
-      var col = document.createElement("div");
-      col.className = "day-col";
-      if (d.total_seconds === null) {
-        // a faint full-height ghost, so it reads as "no reading" not "zero"
-        col.classList.add("no-data");
-      } else {
-        col.style.height =
-          Math.max(2, Math.round((d.total_seconds / max) * 100)) + "%";
+      btn.className = "cell";
+      btn.tabIndex = -1;
+      btn.setAttribute("data-date", iso);
+      btn.setAttribute("aria-label", cellTip(iso));
+      if (d && d.total_seconds !== null) {
+        btn.setAttribute("data-level", String(heatLevel(d.total_seconds)));
       }
-      track.appendChild(col);
+      if (!d) btn.classList.add("unrecorded");
+      btn.style.gridColumn = String(col + 2);
+      btn.style.gridRow = String(row + 2);
+      cal.appendChild(btn);
+      state.cells[iso] = btn;
+    }
+  }
 
-      var label = document.createElement("div");
-      label.className = "day-label";
-      label.textContent = shortDay(d.usage_date);
-
-      btn.appendChild(track);
-      btn.appendChild(label);
-
-      var tipText = dayLabel(d.usage_date) + " — " + (
-        d.total_seconds === null ? "screen time not scraped" : fmt(d.total_seconds));
-      if (d.total_pickups !== null && d.total_pickups !== undefined) {
-        tipText += ", " + d.total_pickups + " pick-ups";
-      }
-
-      btn.addEventListener("mousemove", function (e) { showTip(e, tipText); });
-      btn.addEventListener("mouseleave", hideTip);
-      btn.addEventListener("focus", function () {
-        var r = btn.getBoundingClientRect();
-        showTip({ clientX: r.left + r.width / 2, clientY: r.top }, tipText);
-      });
-      btn.addEventListener("blur", hideTip);
-      btn.addEventListener("click", function () {
-        state.day = d.usage_date;
-        daySelect.value = d.usage_date;
-        renderDay();
-      });
-
-      host.appendChild(btn);
+  function syncCalendar() {
+    Object.keys(state.cells).forEach(function (iso) {
+      var cell = state.cells[iso];
+      cell.setAttribute("aria-pressed", String(iso === state.day));
+      cell.tabIndex = iso === state.focusDate ? 0 : -1;
     });
   }
 
-  function renderDay() {
-    var data = state.data;
-    var day = state.day;
-    var summary = null;
-    data.days.forEach(function (d) { if (d.usage_date === day) summary = d; });
+  function scrollCellIntoView(iso) {
+    var cell = state.cells[iso];
+    var scroller = document.getElementById("calScroll");
+    if (!cell || scroller.scrollWidth <= scroller.clientWidth) return;
+    var c = cell.getBoundingClientRect();
+    var s = scroller.getBoundingClientRect();
+    if (c.left < s.left || c.right > s.right) {
+      scroller.scrollLeft += c.left - s.left - s.width / 2;
+    }
+  }
 
-    var apps = (data.apps[day] || []).slice().sort(function (a, b) {
+  function moveFocus(iso) {
+    if (!state.cells[iso]) return;
+    state.focusDate = iso;
+    syncCalendar();
+    var cell = state.cells[iso];
+    cell.focus();
+    scrollCellIntoView(iso);
+    var r = cell.getBoundingClientRect();
+    showTip({ clientX: r.right, clientY: r.bottom }, cellTip(iso));
+  }
+
+  // One listener set for the whole grid rather than four per cell.
+  (function wireCalendar() {
+    var cal = document.getElementById("cal");
+    function cellOf(evt) {
+      var t = evt.target;
+      return t && t.classList && t.classList.contains("cell") ? t : null;
+    }
+    cal.addEventListener("mousemove", function (e) {
+      var cell = cellOf(e);
+      if (cell) showTip(e, cellTip(cell.getAttribute("data-date")));
+      else hideTip();
+    });
+    cal.addEventListener("mouseleave", hideTip);
+    cal.addEventListener("focusout", hideTip);
+    cal.addEventListener("click", function (e) {
+      var cell = cellOf(e);
+      if (!cell) return;
+      var iso = cell.getAttribute("data-date");
+      state.focusDate = iso;
+      if (state.byDate[iso]) selectDay(iso);
+      else syncCalendar();
+    });
+    cal.addEventListener("keydown", function (e) {
+      var cell = cellOf(e);
+      if (!cell) return;
+      // Rows are weekdays, so up/down is a day and left/right is a week.
+      var step = { ArrowUp: -1, ArrowDown: 1, ArrowLeft: -7, ArrowRight: 7 }[e.key];
+      var iso = cell.getAttribute("data-date");
+      if (step) {
+        e.preventDefault();
+        moveFocus(toIso(addDays(parseIso(iso), step)));
+      } else if (e.key === "Home" || e.key === "End") {
+        e.preventDefault();
+        moveFocus(e.key === "Home" ? state.data.start : state.data.end);
+      }
+    });
+  })();
+
+  // ---- the selected day ---------------------------------------------------
+
+  function selectDay(iso) {
+    state.day = iso;
+    state.focusDate = iso;
+    daySelect.value = iso;
+    syncCalendar();
+    renderDay();
+
+    if (state.details[iso]) return;
+    var device = state.data.device;
+    fetch("/api/day?device=" + encodeURIComponent(device) + "&date=" + iso)
+      .then(function (r) { return r.json(); })
+      .then(function (detail) {
+        if (detail.error) throw new Error(detail.error);
+        if (!state.data || state.data.device !== device) return;  // device changed
+        state.details[iso] = detail;
+        if (state.day === iso) renderDay();
+      })
+      .catch(function (err) {
+        if (state.day !== iso) return;
+        var bars = document.getElementById("bars");
+        clear(bars);
+        var p = document.createElement("p");
+        p.className = "empty";
+        p.textContent = "Could not load this day: " + err.message;
+        bars.appendChild(p);
+      });
+  }
+
+  function renderDay() {
+    var day = state.day;
+    var summary = state.byDate[day] || null;
+    var detail = state.details[day];
+    var loading = !detail;
+
+    var apps = detail ? detail.apps.slice().sort(function (a, b) {
       return b.seconds - a.seconds;
-    });
-    var picks = (data.pickups[day] || []).slice().sort(function (a, b) {
+    }) : [];
+    var picks = detail ? detail.pickups.slice().sort(function (a, b) {
       return b.pickups - a.pickups;
-    });
+    }) : [];
 
     var hasScreenTime = summary && summary.total_seconds !== null;
     var hasPickups = summary && summary.total_pickups !== null &&
@@ -455,7 +701,7 @@
 
     var cats = document.getElementById("cats");
     clear(cats);
-    (data.categories[day] || []).forEach(function (c) {
+    (detail ? detail.categories : []).forEach(function (c) {
       var el = document.createElement("span");
       el.className = "cat";
       el.textContent = c.name + " · " + fmt(c.seconds);
@@ -468,7 +714,7 @@
       apps.map(function (a) {
         return { name: a.name, value: a.seconds, label: fmt(a.seconds), tip: a.text };
       }),
-      "No app activity recorded for this day.");
+      loading ? "Loading…" : "No app activity recorded for this day.");
 
     document.getElementById("pickCard").hidden = !picks.length;
     document.getElementById("pickTitle").textContent = "Pick-ups — " + dayLabel(day);
@@ -505,7 +751,7 @@
       var td = document.createElement("td");
       td.colSpan = 4;
       td.className = "empty";
-      td.textContent = "Nothing recorded for this day.";
+      td.textContent = loading ? "Loading…" : "Nothing recorded for this day.";
       tr.appendChild(td);
       body.appendChild(tr);
     }
@@ -524,12 +770,13 @@
       });
       body.appendChild(tr);
     });
-
-    renderDays();
   }
 
   function renderAll(data) {
     state.data = data;
+    state.details = {};
+    state.byDate = {};
+    data.days.forEach(function (d) { state.byDate[d.usage_date] = d; });
 
     clear(deviceSelect);
     data.devices.forEach(function (name) {
@@ -548,35 +795,48 @@
       daySelect.appendChild(opt);
     });
 
+    document.getElementById("calTitle").textContent =
+      "Last 12 months" + (data.device ? " — " + data.device : "");
+    renderLegend();
+    renderCalStats();
+    renderCalendar();
+
     var subtitle = document.getElementById("subtitle");
     if (!data.days.length) {
       subtitle.textContent = data.device
-        ? "No days recorded yet for " + data.device + "."
+        ? "No days recorded in the last year for " + data.device + "."
         : "No data yet - run log_screentime.py to record a day.";
       state.day = null;
+      state.focusDate = data.end;
+      syncCalendar();
       document.getElementById("hero").textContent = "—";
+      document.getElementById("heroSub").textContent = "";
+      document.getElementById("totalNote").textContent = "";
+      clear(document.getElementById("cats"));
       clear(document.getElementById("bars"));
       clear(document.getElementById("tableBody"));
-      document.getElementById("daysWrap").hidden = true;
       document.getElementById("pickStat").hidden = true;
       document.getElementById("pickCard").hidden = true;
       return;
     }
 
-    subtitle.textContent = data.days.length === 1
-      ? "1 day recorded for " + data.device
-      : data.days.length + " days recorded for " + data.device;
+    subtitle.textContent = (data.days.length === 1
+      ? "1 day recorded for " : data.days.length + " days recorded for ") +
+      data.device + " in the last year";
 
-    state.day = data.days[data.days.length - 1].usage_date;
-    daySelect.value = state.day;
-    renderDay();
+    selectDay(data.days[data.days.length - 1].usage_date);
+    // Open on the newest weeks when the grid is wider than the screen.
+    var scroller = document.getElementById("calScroll");
+    scroller.scrollLeft = scroller.scrollWidth;
   }
 
   function load(device) {
+    var seq = ++state.loadSeq;
     var url = "/api/data" + (device ? "?device=" + encodeURIComponent(device) : "");
     fetch(url)
       .then(function (r) { return r.json(); })
       .then(function (data) {
+        if (seq !== state.loadSeq) return;  // a newer device pick won
         if (data.error) {
           document.getElementById("subtitle").textContent = data.error;
           return;
@@ -590,8 +850,8 @@
 
   deviceSelect.addEventListener("change", function () { load(deviceSelect.value); });
   daySelect.addEventListener("change", function () {
-    state.day = daySelect.value;
-    renderDay();
+    selectDay(daySelect.value);
+    scrollCellIntoView(daySelect.value);
   });
 
   load(null);

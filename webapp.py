@@ -20,7 +20,7 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -33,7 +33,8 @@ INDEX = os.path.join(HERE, "index.html")
 # Websites are reported alongside apps and overlap them, so only the app view is
 # charted; mixing the two would double count.
 VIEW_MODE = "Show Apps"
-DAYS = 7
+# The calendar heatmap's span, ending today - a GitHub-style year.
+RANGE_DAYS = 365
 
 # Shown when the page is opened without an explicit ?device=. Matched loosely,
 # because Screen Time spells the devices inconsistently - "Nolan's iPhone" uses a
@@ -70,94 +71,84 @@ def list_devices(conn):
     return [r["device"] for r in rows]
 
 
-def device_data(conn, device):
-    """The most recent DAYS days that have any data at all for this device.
+def device_data(conn, device, today=None):
+    """Daily totals for the last year, for the calendar heatmap.
 
-    Screen time and pick-ups are scraped from separate screens, so a day can
-    have one without the other; the day list is the union of both.
+    Only the per-day totals - the per-app breakdown for a whole year would be a
+    large download nobody reads at once, so it is fetched a day at a time from
+    /api/day. Screen time and pick-ups are scraped from separate screens, so a
+    day can have one without the other; the day list is the union of both.
     """
-    dates = [r["usage_date"] for r in conn.execute(
-        "SELECT usage_date FROM ("
+    today = today or date.today()
+    latest = conn.execute(
+        "SELECT MAX(usage_date) AS d FROM ("
         "  SELECT usage_date FROM day_summary WHERE device = ? AND view_mode = ?"
-        "  UNION"
-        "  SELECT usage_date FROM pickup_summary WHERE device = ?"
-        ") ORDER BY usage_date DESC LIMIT ?",
-        (device, VIEW_MODE, device, DAYS)).fetchall()]
-    dates.reverse()  # oldest -> newest for the chart
+        "  UNION ALL"
+        "  SELECT usage_date FROM pickup_summary WHERE device = ?)",
+        (device, VIEW_MODE, device)).fetchone()["d"]
+    # A scrape dated after the server's today (clock or timezone skew) still
+    # belongs on the calendar rather than silently off its right edge.
+    end = max(today, date.fromisoformat(latest)) if latest else today
+    start = end - timedelta(days=RANGE_DAYS - 1)
+    bounds = (start.isoformat(), end.isoformat())
 
-    apps = {}
-    categories = {}
-    pickups = {}
-    pickup_totals = {}
+    summaries = {r["usage_date"]: r for r in conn.execute(
+        "SELECT usage_date, total_seconds, total_text, scraped_at "
+        "FROM day_summary WHERE device = ? AND view_mode = ? "
+        "AND usage_date BETWEEN ? AND ?",
+        (device, VIEW_MODE) + bounds).fetchall()}
+    pickup_totals = {r["usage_date"]: r for r in conn.execute(
+        "SELECT usage_date, total_pickups, scraped_at FROM pickup_summary "
+        "WHERE device = ? AND usage_date BETWEEN ? AND ?",
+        (device,) + bounds).fetchall()}
+
     days = []
+    for iso in sorted(set(summaries) | set(pickup_totals)):  # oldest -> newest
+        summary = summaries.get(iso)
+        pick = pickup_totals.get(iso)
+        days.append({
+            "usage_date": iso,
+            # None (not 0) where that screen was never scraped for this day
+            "total_seconds": summary["total_seconds"] if summary else None,
+            "total_text": summary["total_text"] if summary else None,
+            "scraped_at": (summary or pick)["scraped_at"],
+            "total_pickups": pick["total_pickups"] if pick else None,
+            "pickups_scraped_at": pick["scraped_at"] if pick else None,
+        })
 
-    if dates:
-        placeholders = ",".join("?" * len(dates))
+    return {"device": device, "start": bounds[0], "end": bounds[1], "days": days}
 
-        summaries = {r["usage_date"]: dict(r) for r in conn.execute(
-            "SELECT usage_date, total_seconds, total_text, scraped_at "
-            "FROM day_summary WHERE device = ? AND view_mode = ? "
-            "AND usage_date IN (%s)" % placeholders,
-            [device, VIEW_MODE] + dates).fetchall()}
 
-        for r in conn.execute(
-                "SELECT usage_date, total_pickups, scraped_at FROM pickup_summary "
-                "WHERE device = ? AND usage_date IN (%s)" % placeholders,
-                [device] + dates).fetchall():
-            pickup_totals[r["usage_date"]] = {
-                "total_pickups": r["total_pickups"],
-                "scraped_at": r["scraped_at"],
-            }
+def day_detail(conn, device, iso):
+    """Per-app, per-category and per-app pick-up rows for one day."""
+    apps = [{
+        "name": r["item_name"],
+        "level": r["item_level"],
+        "seconds": r["seconds"],
+        "text": r["duration_text"],
+    } for r in conn.execute(
+        "SELECT item_name, item_level, seconds, duration_text FROM app_usage "
+        "WHERE device = ? AND view_mode = ? AND usage_date = ? "
+        "ORDER BY seconds DESC", (device, VIEW_MODE, iso)).fetchall()]
 
-        for iso in dates:
-            summary = summaries.get(iso)
-            pick = pickup_totals.get(iso)
-            days.append({
-                "usage_date": iso,
-                # None (not 0) where that screen was never scraped for this day
-                "total_seconds": summary["total_seconds"] if summary else None,
-                "total_text": summary["total_text"] if summary else None,
-                "scraped_at": (summary or pick or {}).get("scraped_at"),
-                "total_pickups": pick["total_pickups"] if pick else None,
-                "pickups_scraped_at": pick["scraped_at"] if pick else None,
-            })
+    categories = [{
+        "name": r["category_name"],
+        "seconds": r["seconds"],
+        "text": r["duration_text"],
+    } for r in conn.execute(
+        "SELECT category_name, seconds, duration_text FROM category_usage "
+        "WHERE device = ? AND view_mode = ? AND usage_date = ? "
+        "ORDER BY seconds DESC", (device, VIEW_MODE, iso)).fetchall()]
 
-        for r in conn.execute(
-                "SELECT usage_date, item_name, pickups FROM pickup_usage "
-                "WHERE device = ? AND usage_date IN (%s) "
-                "ORDER BY pickups DESC" % placeholders,
-                [device] + dates).fetchall():
-            pickups.setdefault(r["usage_date"], []).append({
-                "name": r["item_name"],
-                "pickups": r["pickups"],
-            })
+    pickups = [{
+        "name": r["item_name"],
+        "pickups": r["pickups"],
+    } for r in conn.execute(
+        "SELECT item_name, pickups FROM pickup_usage "
+        "WHERE device = ? AND usage_date = ? ORDER BY pickups DESC",
+        (device, iso)).fetchall()]
 
-        rows = conn.execute(
-            "SELECT usage_date, item_name, item_level, seconds, duration_text "
-            "FROM app_usage WHERE device = ? AND view_mode = ? "
-            "AND usage_date IN (%s) ORDER BY seconds DESC" % placeholders,
-            [device, VIEW_MODE] + dates).fetchall()
-        for r in rows:
-            apps.setdefault(r["usage_date"], []).append({
-                "name": r["item_name"],
-                "level": r["item_level"],
-                "seconds": r["seconds"],
-                "text": r["duration_text"],
-            })
-
-        rows = conn.execute(
-            "SELECT usage_date, category_name, seconds, duration_text "
-            "FROM category_usage WHERE device = ? AND view_mode = ? "
-            "AND usage_date IN (%s) ORDER BY seconds DESC" % placeholders,
-            [device, VIEW_MODE] + dates).fetchall()
-        for r in rows:
-            categories.setdefault(r["usage_date"], []).append({
-                "name": r["category_name"],
-                "seconds": r["seconds"],
-                "text": r["duration_text"],
-            })
-
-    return {"device": device, "days": days, "apps": apps,
+    return {"device": device, "usage_date": iso, "apps": apps,
             "categories": categories, "pickups": pickups}
 
 
@@ -453,18 +444,33 @@ class Handler(BaseHTTPRequestHandler):
                 if url.path == "/api/devices":
                     self._json({"devices": list_devices(conn)})
                     return
-                if url.path == "/api/data":
+                if url.path in ("/api/data", "/api/day"):
                     devices = list_devices(conn)
                     device = pick_device(
                         devices, (query.get("device") or [None])[0],
                         self.default_device)
+                if url.path == "/api/data":
                     if device is None:
-                        self._json({"devices": [], "device": None, "days": [],
-                                    "apps": {}, "categories": {}, "pickups": {}})
+                        today = date.today()
+                        self._json({
+                            "devices": [], "device": None, "days": [],
+                            "start": (today - timedelta(days=RANGE_DAYS - 1)).isoformat(),
+                            "end": today.isoformat()})
                         return
                     payload = device_data(conn, device)
                     payload["devices"] = devices
                     self._json(payload)
+                    return
+                if url.path == "/api/day":
+                    try:
+                        iso = date.fromisoformat((query.get("date") or [""])[0]).isoformat()
+                    except ValueError:
+                        self._json({"error": "date must be YYYY-MM-DD"}, 400)
+                        return
+                    if device is None:
+                        self._json({"error": "no devices recorded yet"}, 404)
+                        return
+                    self._json(day_detail(conn, device, iso))
                     return
             except sqlite3.Error as exc:
                 self._json({"error": str(exc)}, 500)
